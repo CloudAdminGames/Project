@@ -1,21 +1,13 @@
 {
   "name": "project",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/CloudAdminGames/Project.git"
+  "peerDependencies": {
+    "typescript": "^5"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/CloudAdminGames/Project/issues"
-  },
-  "homepage": "https://github.com/CloudAdminGames/Project#readme"
+  "dependencies": {}
 }
