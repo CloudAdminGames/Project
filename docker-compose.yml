@@ -1,0 +1,53 @@
+services:
+  # Base de données PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: rawg-postgres
+    environment:
+      POSTGRES_USER: rawg_user
+      POSTGRES_PASSWORD: rawg_password
+      POSTGRES_DB: rawg_games
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./rawg-games-cleaned.csv:/data/rawg-games-cleaned.csv:ro
+      - ./docker/import-data.sql:/docker-entrypoint-initdb.d/02-import.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rawg_user -d rawg_games"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rawg-network
+
+  # API Node.js
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: rawg-api
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: rawg_user
+      DB_PASSWORD: rawg_password
+      DB_NAME: rawg_games
+      API_PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rawg-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  rawg-network:
+    driver: bridge

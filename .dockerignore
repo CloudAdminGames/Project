@@ -1,0 +1,29 @@
+# RAWG Games API - Fichiers à ignorer
+
+# Données
+rawg-games-dataset.csv
+*.log
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+postgres_data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
