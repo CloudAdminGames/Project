@@ -1,8 +1,31 @@
 import { SQL } from "bun";
 
-const PORT = 3000;
+function envPositiveInt(name: string, defaultValue: number) {
+  const raw = Bun.env[name];
+  if (!raw) return defaultValue;
 
-const sql = new SQL("postgres://admin:password123@localhost:5432/inventory");
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+
+  return parsed;
+}
+
+const PORT = envPositiveInt("PORT", 3000);
+const DATABASE_URL =
+  Bun.env.DATABASE_URL ?? "postgres://admin:password123@localhost:5432/inventory";
+const DB_POOL_MAX_CONNECTIONS = envPositiveInt("DB_POOL_MAX_CONNECTIONS", 50);
+const BENCH_HEADER = "x-bench";
+const BENCH_HEADER_VALUE = "1";
+const ENABLE_HMR = Bun.env.ENABLE_HMR === "1";
+
+function shouldLogRequest(req: Request) {
+  return (
+    Bun.env.BENCH_MODE !== "1" &&
+    req.headers.get(BENCH_HEADER) !== BENCH_HEADER_VALUE
+  );
+}
+
+const sql = new SQL(DATABASE_URL, { max: DB_POOL_MAX_CONNECTIONS });
 
 // All valid column names in the games table
 const VALID_COLUMNS = [
@@ -11,66 +34,31 @@ const VALID_COLUMNS = [
   "name",
   "released",
   "background_image",
-  "rating",
-  "rating_top",
   "ratings_count",
-  "reviews_text_count",
-  "added",
-  "playtime",
-  "suggestions_count",
-  "updated",
   "reviews_count",
-  "saturated_color",
-  "dominant_color",
+  "ratings",
   "platforms",
-  "stores",
-  "developers",
+  "parent_platforms",
   "genres",
   "tags",
+  "developers",
   "publishers",
-  "esrb_rating",
-  "added_by_status",
-  "metacritic_url",
-  "ratings",
-  "clip",
-  "name_original",
-  "reddit_url",
-  "reactions",
-  "parents_count",
-  "background_image_additional",
-  "website",
-  "reddit_count",
-  "youtube_count",
-  "short_screenshots",
-  "creators_count",
-  "twitch_count",
-  "metacritic_platforms",
-  "screenshots_count",
-  "parent_platforms",
-  "description",
+  "stores",
   "description_raw",
-  "metacritic",
-  "achievements_count",
-  "alternative_names",
-  "parent_achievements_count",
-  "game_series_count",
-  "additions_count",
-  "movies_count",
-  "reddit_name",
-  "reddit_description",
-  "reddit_logo",
-  "tba",
+  "short_screenshots",
 ] as const;
 
 Bun.serve({
   port: PORT,
   routes: {
     "/health": {
-      GET: () => {
+      GET: (req) => {
         const start = performance.now();
         const response = new Response("OK", { status: 200 });
         const duration = performance.now() - start;
-        console.log(`GET /health - ${duration.toFixed(2)}ms`);
+        if (shouldLogRequest(req)) {
+          console.log(`GET /health - ${duration.toFixed(2)}ms`);
+        }
         return response;
       },
     },
@@ -80,8 +68,9 @@ Bun.serve({
         const url = new URL(req.url);
         const column = url.searchParams.get("column");
         const searchQuery = url.searchParams.get("q");
+        const trimmedQuery = searchQuery?.trim() ?? "";
 
-        if (!searchQuery || searchQuery.trim() === "") {
+        if (!trimmedQuery) {
           return Response.json(
             { error: "Missing search query parameter 'q'" },
             { status: 400 },
@@ -100,53 +89,61 @@ Bun.serve({
             );
           }
 
-          const queryText = `SELECT * FROM games WHERE "${column}"::text ILIKE $1 LIMIT 20`;
-          const games = await sql.unsafe(queryText, [`%${searchQuery.trim()}%`]);
+          const queryText = `SELECT row_to_json(g) AS doc FROM game g WHERE "${column}"::text ILIKE $1`;
+          const rows = await sql.unsafe(queryText, [`%${trimmedQuery}%`]);
+          const games = rows.map((row: any) => row.doc);
           const duration = performance.now() - start;
-          console.log(
-            `GET /api/games/search?column=${column}&q=${searchQuery} - ${duration.toFixed(2)}ms`,
-          );
+          if (shouldLogRequest(req)) {
+            console.log(
+              `GET /api/games/search?column=${column}&q=${trimmedQuery} - ${duration.toFixed(2)}ms`,
+            );
+          }
           return Response.json({
             data: games,
             meta: {
               count: games.length,
               duration_ms: parseFloat(duration.toFixed(2)),
               column,
-              query: searchQuery,
+              query: trimmedQuery,
             },
           });
         }
 
         // No column specified: search across all columns (original behavior)
-        const searchTerms = searchQuery.trim().split(/\s+/);
+        const searchTerms = trimmedQuery.split(/\s+/);
 
         const conditions = searchTerms.map((_, index) => {
-          return `games::text ILIKE $${index + 1}`;
+          return `g::text ILIKE $${index + 1}`;
         });
 
         const whereClause = conditions.join(" AND ");
-        const queryText = `SELECT * FROM games WHERE ${whereClause} LIMIT 20`;
+        const queryText = `SELECT row_to_json(g) AS doc FROM game g WHERE ${whereClause}`;
 
         const searchPatterns = searchTerms.map((term) => `%${term}%`);
-        const games = await sql.unsafe(queryText, searchPatterns);
+        const rows = await sql.unsafe(queryText, searchPatterns);
+        const games = rows.map((row: any) => row.doc);
         const duration = performance.now() - start;
-        console.log(
-          `GET /api/games/search?q=${searchQuery} - ${duration.toFixed(2)}ms`,
-        );
+        if (shouldLogRequest(req)) {
+          console.log(
+            `GET /api/games/search?q=${trimmedQuery} - ${duration.toFixed(2)}ms`,
+          );
+        }
         return Response.json({
           data: games,
           meta: {
             count: games.length,
             duration_ms: parseFloat(duration.toFixed(2)),
-            query: searchQuery,
+            query: trimmedQuery,
           },
         });
       },
     },
   },
   development: {
-    hmr: true,
+    hmr: ENABLE_HMR,
   },
 });
 
-console.log(`Server is running on port ${PORT}`);
+console.log(
+  `Server is running on port ${PORT} (pool_max_connections=${DB_POOL_MAX_CONNECTIONS})`,
+);
