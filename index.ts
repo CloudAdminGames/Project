@@ -1,149 +1,76 @@
 import { SQL } from "bun";
 
-function envPositiveInt(name: string, defaultValue: number) {
-  const raw = Bun.env[name];
-  if (!raw) return defaultValue;
+const sql = new SQL("postgres://admin:password123@localhost:5432/inventory", {
+  max: 50,
+});
 
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+const VALID_COLUMNS = new Set([
+  "id", "slug", "name", "released", "background_image",
+  "ratings_count", "reviews_count", "ratings", "platforms",
+  "parent_platforms", "genres", "tags", "developers",
+  "publishers", "stores", "description_raw", "short_screenshots",
+]);
 
-  return parsed;
-}
-
-const PORT = envPositiveInt("PORT", 3000);
-const DATABASE_URL =
-  Bun.env.DATABASE_URL ?? "postgres://admin:password123@localhost:5432/inventory";
-const DB_POOL_MAX_CONNECTIONS = envPositiveInt("DB_POOL_MAX_CONNECTIONS", 50);
-const BENCH_HEADER = "x-bench";
-const BENCH_HEADER_VALUE = "1";
-const ENABLE_HMR = Bun.env.ENABLE_HMR === "1";
-
-function shouldLogRequest(req: Request) {
-  return (
-    Bun.env.BENCH_MODE !== "1" &&
-    req.headers.get(BENCH_HEADER) !== BENCH_HEADER_VALUE
-  );
-}
-
-const sql = new SQL(DATABASE_URL, { max: DB_POOL_MAX_CONNECTIONS });
-
-// All valid column names in the games table
-const VALID_COLUMNS = [
-  "id",
-  "slug",
-  "name",
-  "released",
-  "background_image",
-  "ratings_count",
-  "reviews_count",
-  "ratings",
-  "platforms",
-  "parent_platforms",
-  "genres",
-  "tags",
-  "developers",
-  "publishers",
-  "stores",
-  "description_raw",
-  "short_screenshots",
-] as const;
+const JSON_HEADERS = { "Content-Type": "application/json" };
 
 Bun.serve({
-  port: PORT,
+  port: 3000,
   routes: {
-    "/health": {
-      GET: (req) => {
-        const start = performance.now();
-        const response = new Response("OK", { status: 200 });
-        const duration = performance.now() - start;
-        if (shouldLogRequest(req)) {
-          console.log(`GET /health - ${duration.toFixed(2)}ms`);
-        }
-        return response;
-      },
-    },
+    "/health": { GET: () => new Response("OK") },
     "/api/games/search": {
       GET: async (req) => {
         const start = performance.now();
         const url = new URL(req.url);
         const column = url.searchParams.get("column");
-        const searchQuery = url.searchParams.get("q");
-        const trimmedQuery = searchQuery?.trim() ?? "";
+        const q = url.searchParams.get("q")?.trim() ?? "";
+        const exact = url.searchParams.get("exact") === "true";
 
-        if (!trimmedQuery) {
-          return Response.json(
-            { error: "Missing search query parameter 'q'" },
-            { status: 400 },
+        if (!q) {
+          return new Response(
+            '{"error":"Missing search query parameter \'q\'"}',
+            { status: 400, headers: JSON_HEADERS },
           );
         }
 
-        // If a column is specified, search only that column
+        // Column-specific search. Exact matching is opt-in via `exact=true`.
         if (column) {
-          if (!VALID_COLUMNS.includes(column as any)) {
-            return Response.json(
-              {
-                error: `Invalid column "${column}"`,
-                valid_columns: VALID_COLUMNS,
-              },
-              { status: 400 },
+          if (!VALID_COLUMNS.has(column)) {
+            return new Response(
+              `{"error":"Invalid column ${JSON.stringify(column)}"}`,
+              { status: 400, headers: JSON_HEADERS },
             );
           }
 
-          const queryText = `SELECT row_to_json(g) AS doc FROM game g WHERE "${column}"::text ILIKE $1`;
-          const rows = await sql.unsafe(queryText, [`%${trimmedQuery}%`]);
-          const games = rows.map((row: any) => row.doc);
-          const duration = performance.now() - start;
-          if (shouldLogRequest(req)) {
-            console.log(
-              `GET /api/games/search?column=${column}&q=${trimmedQuery} - ${duration.toFixed(2)}ms`,
-            );
-          }
-          return Response.json({
-            data: games,
-            meta: {
-              count: games.length,
-              duration_ms: parseFloat(duration.toFixed(2)),
-              column,
-              query: trimmedQuery,
-            },
-          });
-        }
-
-        // No column specified: search across all columns (original behavior)
-        const searchTerms = trimmedQuery.split(/\s+/);
-
-        const conditions = searchTerms.map((_, index) => {
-          return `g::text ILIKE $${index + 1}`;
-        });
-
-        const whereClause = conditions.join(" AND ");
-        const queryText = `SELECT row_to_json(g) AS doc FROM game g WHERE ${whereClause}`;
-
-        const searchPatterns = searchTerms.map((term) => `%${term}%`);
-        const rows = await sql.unsafe(queryText, searchPatterns);
-        const games = rows.map((row: any) => row.doc);
-        const duration = performance.now() - start;
-        if (shouldLogRequest(req)) {
-          console.log(
-            `GET /api/games/search?q=${trimmedQuery} - ${duration.toFixed(2)}ms`,
+          const useExactMatch = exact;
+          const operator = useExactMatch ? "=" : "ILIKE";
+          const value = useExactMatch ? q : `%${q}%`;
+          const [row] = await sql.unsafe(
+            `SELECT COALESCE(json_agg(to_jsonb(g) - 'search_text')::text, '[]') AS data, count(*) AS total FROM game g WHERE "${column}"::text ${operator} $1`,
+            [value],
+          );
+          const ms = Math.round((performance.now() - start) * 100) / 100;
+          return new Response(
+            `{"data":${row.data},"meta":{"count":${row.total},"duration_ms":${ms},"column":${JSON.stringify(column)},"query":${JSON.stringify(q)},"exact":${JSON.stringify(useExactMatch)}}}`,
+            { headers: JSON_HEADERS },
           );
         }
-        return Response.json({
-          data: games,
-          meta: {
-            count: games.length,
-            duration_ms: parseFloat(duration.toFixed(2)),
-            query: trimmedQuery,
-          },
-        });
+
+        // Full-text search across all searchable fields (uses search_text GIN index)
+        const terms = q.split(/\s+/);
+        const where = terms.map((_, i) => `g.search_text ILIKE $${i + 1}`).join(" AND ");
+        const [row] = await sql.unsafe(
+          `SELECT COALESCE(json_agg(to_jsonb(g) - 'search_text')::text, '[]') AS data, count(*) AS total FROM game g WHERE ${where}`,
+          terms.map((t) => `%${t}%`),
+        );
+        const ms = Math.round((performance.now() - start) * 100) / 100;
+        return new Response(
+          `{"data":${row.data},"meta":{"count":${row.total},"duration_ms":${ms},"query":${JSON.stringify(q)}}}`,
+          { headers: JSON_HEADERS },
+        );
       },
     },
   },
-  development: {
-    hmr: ENABLE_HMR,
-  },
+  development: { hmr: false },
 });
 
-console.log(
-  `Server is running on port ${PORT} (pool_max_connections=${DB_POOL_MAX_CONNECTIONS})`,
-);
+console.log("Server is running on port 3000");
