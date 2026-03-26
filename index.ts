@@ -65,7 +65,7 @@ function jsonError(status: number, message: string): Response {
   });
 }
 
-function queryMeta(params: SearchParams): Record<string, string | boolean | null> {
+function queryMeta(params: SearchParams): Record<string, string | boolean | number | null> {
   return {
     q: params.q,
     column: params.column,
@@ -116,10 +116,8 @@ function buildSearchSql(params: SearchParams): { sqlText: string; values: BindVa
       values.push(value);
     }
   } else if (params.q) {
-    for (const term of params.q.split(/\s+/)) {
-      predicates.push(`g.search_text ILIKE $${values.length + 1}`);
-      values.push(`%${term}%`);
-    }
+    predicates.push(`g.search_tsv @@ websearch_to_tsquery('simple', $${values.length + 1})`);
+    values.push(params.q);
   }
 
   if (params.releasedFrom) {
